@@ -110,7 +110,10 @@ class Pre:
 @dataclass(slots=True)
 class Post:
     character: int = 0
-    state: int = 0
+    # Action-state id (slp spec calls this "state"; we use "action" to match
+    # libmelee's PlayerState.action and MDS column naming. state_age and
+    # state_flags keep the historical "state_" prefix.
+    action: int = 0
     position: Position = field(default_factory=Position)
     direction: float = 0.0                            # raw f32
     percent: float = 0.0
@@ -118,17 +121,17 @@ class Post:
     last_attack_landed: int = 0
     combo_count: int = 0
     last_hit_by: int = 0
-    stocks: int = 0
-    state_age: Optional[float] = None                 # slp 0.2+
-    state_flags: Optional[tuple] = None               # slp 2.0+, 5×u8
+    stock: int = 0                                    # slp spec: "stocks"
+    state_age: Optional[float] = None                 # slp 0.2+, age of `action`
+    state_flags: Optional[tuple] = None               # slp 2.0+, 5×u8 on `action`
     misc_as: Optional[float] = None                   # slp 2.0+
     airborne: Optional[int] = None                    # slp 2.0+, raw u8 (0=ground, 1=air)
     ground: Optional[int] = None                      # slp 2.0+
-    jumps: Optional[int] = None                       # slp 2.0+
+    jumps_used: Optional[int] = None                  # slp 2.0+, spec: "jumps"
     l_cancel: Optional[int] = None                    # slp 2.0+
     hurtbox_state: Optional[int] = None               # slp 2.1+, raw u8
     velocities: Optional[Velocities] = None           # slp 3.5+
-    hitlag: Optional[float] = None                    # slp 3.8+, raw f32
+    hitlag_left: Optional[float] = None               # slp 3.8+, raw f32, spec: "hitlag"
     animation_index: Optional[int] = None             # slp 3.11+
     last_hit_by_instance: Optional[int] = None        # slp 3.16+
     instance_id: Optional[int] = None                 # slp 3.16+

@@ -1294,18 +1294,18 @@ class Console:
         except ValueError:
             playerstate.character = enums.Character.UNKNOWN_CHARACTER
         try:
-            playerstate.action = enums.Action(post.state)
+            playerstate.action = enums.Action(post.action)
         except ValueError:
-            playerstate.action = gamestate_lib.UnknownAnimation(post.state)
+            playerstate.action = gamestate_lib.UnknownAnimation(post.action)
         playerstate.facing = post.direction > 0
         playerstate.percent = post.percent
         playerstate.shield_strength = post.shield
-        playerstate.stock = post.stocks
+        playerstate.stock = post.stock
         playerstate.action_frame = int(post.state_age) if post.state_age is not None else 0
         playerstate.is_powershield = bool(post.state_flags and (post.state_flags[3] & 0x20))
         playerstate.hitstun_frames_left = int(post.misc_as) if post.misc_as is not None else 0
         playerstate.on_ground = (not post.airborne) if post.airborne is not None else True
-        playerstate.jumps_left = post.jumps if post.jumps is not None else 1
+        playerstate.jumps_left = post.jumps_used if post.jumps_used is not None else 1
         playerstate.invulnerable = bool(post.hurtbox_state) if post.hurtbox_state is not None else False
         if post.velocities is not None:
             playerstate.speed_air_x_self = post.velocities.self_x_air
@@ -1319,7 +1319,7 @@ class Console:
             playerstate.speed_x_attack = 0
             playerstate.speed_y_attack = 0
             playerstate.speed_ground_x_self = 0
-        playerstate.hitlag_left = int(post.hitlag) if post.hitlag is not None else 0
+        playerstate.hitlag_left = int(post.hitlag_left) if post.hitlag_left is not None else 0
 
         # The pre-warning occurs when we first start a dash dance.
         if controller_port in self._prev_gamestate.players:

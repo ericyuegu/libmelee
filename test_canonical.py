@@ -311,10 +311,10 @@ class EndToEnd(unittest.TestCase):
         self.assertIn(1, f['ports'])
         self.assertIn(2, f['ports'])
         post1 = f['ports'][1]['leader']['post']
-        # slp 3.6.1: velocities (3.5+) present, hitlag (3.8+) None,
+        # slp 3.6.1: velocities (3.5+) present, hitlag_left (3.8+) None,
         # animation_index (3.11+) None, instance_id (3.16+) None.
         self.assertIsNotNone(post1['velocities'])
-        self.assertIsNone(post1['hitlag'])
+        self.assertIsNone(post1['hitlag_left'])
         self.assertIsNone(post1['animation_index'])
         self.assertIsNone(post1['instance_id'])
         # airborne must be int 0 or 1, not bool.
@@ -336,7 +336,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_test_game_2_old_slp_optionals(self):
         """test_game_2.slp is slp 2.0.1: hurtbox_state (2.1+), velocities
-        (3.5+), hitlag (3.8+), animation_index (3.11+) must all be None.
+        (3.5+), hitlag_left (3.8+), animation_index (3.11+) must all be None.
         raw_analog_y / raw_analog_cstick_* (3.15+/3.17+) must be None."""
         canon = self._replay(
             'test_artifacts/test_game_2.slp', allow_old_version=True)
@@ -349,7 +349,7 @@ class EndToEnd(unittest.TestCase):
         pre = f['ports'][port]['leader']['pre']
         self.assertIsNone(post['hurtbox_state'])
         self.assertIsNone(post['velocities'])
-        self.assertIsNone(post['hitlag'])
+        self.assertIsNone(post['hitlag_left'])
         self.assertIsNone(post['animation_index'])
         self.assertIsNone(post['instance_id'])
         self.assertIsNone(pre['raw_analog_y'])

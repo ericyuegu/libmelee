@@ -18,6 +18,26 @@ def fix_analog_stick(x: float) -> float:
     fudged = raw + 0.1  # Go slightly above the threshold to avoid rounding issues
     return (fudged / (127 * 2)) + 0.5  # Desired input value in [0, 1]
 
+def fix_analog_stick_signed(x: float) -> float:
+    """Same as fix_analog_stick but accepts a signed [-1, 1] input, neutral 0.
+
+    Convenience entry point for callers (e.g. offline replays from peppi) that
+    work in peppi's logical stick units rather than libmelee's [0, 1] wire
+    range. ``x`` is clipped to [-1, 1] before mapping.
+    """
+    return fix_analog_stick((x + 1.0) / 2.0)
+
+def raw_byte_to_wire(raw: int) -> float:
+    """Map a Slippi-recorded int8 stick byte (-128..127) to the wire float that
+    Dolphin's pipe parser deserializes back into the same byte.
+
+    Inverse of the floor formula Dolphin uses on the receiving side:
+    ``raw = floor[(x - 0.5) * 254]``. The ``+0.1`` term mirrors the fudge
+    constant in ``fix_analog_stick`` and keeps the floor stable against
+    rounding noise.
+    """
+    return (raw + 0.1) / 254.0 + 0.5
+
 def fix_analog_trigger(x: float) -> float:
     """Fixes the analog trigger values to match Console.step output."""
     raw = round(x * 140)  # Desired raw value in [0, 140]

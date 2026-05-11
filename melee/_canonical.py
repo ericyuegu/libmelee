@@ -32,7 +32,7 @@ def _maybe(fmt: str, buf: bytes, off: int):
 def read_post(buf: bytes, version: tuple[int, int, int]) -> Post:
 	p = Post()
 	p.character = struct.unpack_from('>B', buf, 0x07)[0]
-	p.state = struct.unpack_from('>H', buf, 0x08)[0]
+	p.action = struct.unpack_from('>H', buf, 0x08)[0]
 	p.position = Position(
 		struct.unpack_from('>f', buf, 0x0A)[0],
 		struct.unpack_from('>f', buf, 0x0E)[0],
@@ -43,7 +43,7 @@ def read_post(buf: bytes, version: tuple[int, int, int]) -> Post:
 	p.last_attack_landed = struct.unpack_from('>B', buf, 0x1E)[0]
 	p.combo_count = struct.unpack_from('>B', buf, 0x1F)[0]
 	p.last_hit_by = struct.unpack_from('>B', buf, 0x20)[0]
-	p.stocks = struct.unpack_from('>B', buf, 0x21)[0]
+	p.stock = struct.unpack_from('>B', buf, 0x21)[0]
 
 	if version >= (0, 2, 0):
 		p.state_age = _maybe('>f', buf, 0x22)
@@ -53,7 +53,7 @@ def read_post(buf: bytes, version: tuple[int, int, int]) -> Post:
 		p.misc_as = _maybe('>f', buf, 0x2B)
 		p.airborne = _maybe('>B', buf, 0x2F)
 		p.ground = _maybe('>H', buf, 0x30)
-		p.jumps = _maybe('>B', buf, 0x32)
+		p.jumps_used = _maybe('>B', buf, 0x32)
 		p.l_cancel = _maybe('>B', buf, 0x33)
 	if version >= (2, 1, 0):
 		p.hurtbox_state = _maybe('>B', buf, 0x34)
@@ -61,7 +61,7 @@ def read_post(buf: bytes, version: tuple[int, int, int]) -> Post:
 		v = struct.unpack_from('>fffff', buf, 0x35)
 		p.velocities = Velocities(v[0], v[1], v[2], v[3], v[4])
 	if version >= (3, 8, 0):
-		p.hitlag = _maybe('>f', buf, 0x49)
+		p.hitlag_left = _maybe('>f', buf, 0x49)
 	if version >= (3, 11, 0):
 		p.animation_index = _maybe('>I', buf, 0x4D)
 	if version >= (3, 16, 0):
