@@ -126,5 +126,115 @@ Each of these old values will be removed in version 1.0.0. So update your progra
 8. `hitlag` boolean has been changed to `hitlag_left` int
 9. `ProjectileSubtype` has been renamed to `ProjectileType` to refer to its primary type enum. There is a new `subtype` int that refers to a subtype.
 
+### Canonical schema (peppi-py parity)
+
+For online imitation-learning workflows where the same model trains on
+recorded `.slp` files (parsed by peppi-py) and runs live (parsed by libmelee),
+both libraries now emit a byte-for-byte identical per-frame dict via
+`GameState.to_canonical_dict()` (libmelee) and `peppi_py.read_frame_dicts(path)`
+(peppi-py). All version-gated fields are `Optional[T]` (None when the slp file
+predates the field), never default-zero. See
+`peppi-py/scripts/baseline_libmelee_vs_peppi.py` for the regression harness.
+
+**Schema authority.** When libmelee and peppi-py disagree, the chain of
+authority is: [slippi-wiki SPEC.md](https://github.com/project-slippi/slippi-wiki/blob/master/SPEC.md)
+→ Dolphin (Slippi-Ishiiruka, source of all real `.slp` files) → peppi crate
+→ peppi-py → libmelee. Practical rule: when the parity assertion fails, fix
+libmelee unless peppi is demonstrably wrong vs SPEC.md / Dolphin's emission.
+The `CrossShape` test class in `test_canonical.py` enforces structural
+field-name alignment between libmelee's `_canonical.py` and peppi-py's
+`frame.py`.
+
+Migration table from legacy `PlayerState` attributes to canonical paths:
+
+| Old (PlayerState)                        | Canonical                                                  |
+|------------------------------------------|------------------------------------------------------------|
+| `players[p].character`                   | `ports[p].leader.post.character` (raw int)                 |
+| `players[p].position`                    | `ports[p].leader.post.position`                            |
+| `players[p].percent`                     | `ports[p].leader.post.percent`                             |
+| `players[p].shield_strength`             | `ports[p].leader.post.shield`                              |
+| `players[p].stock`                       | `ports[p].leader.post.stocks`                              |
+| `players[p].facing` (bool)               | `ports[p].leader.post.direction > 0` (raw f32 ≷ 0)         |
+| `players[p].action` (Action)             | `Action(ports[p].leader.post.state)`                       |
+| `players[p].action_frame` (int)          | `ports[p].leader.post.state_age` (raw float)               |
+| `players[p].is_powershield`              | `ports[p].leader.post.state_flags[3] & 0x20`               |
+| `players[p].invulnerable`                | `(ports[p].leader.post.hurtbox_state or 0) != 0` (slp 2.1+; None on older) |
+| `players[p].invulnerability_left`        | DROPPED (was dead — never assigned)                        |
+| `players[p].hitlag_left` (int)           | `ports[p].leader.post.hitlag` (raw float, slp 3.8+)        |
+| `players[p].hitstun_frames_left`         | `ports[p].leader.post.misc_as` (raw float)                 |
+| `players[p].jumps_left`                  | `ports[p].leader.post.jumps`                               |
+| `players[p].on_ground`                   | `not ports[p].leader.post.airborne` (slp 2.0+; None on older — defaults to True) |
+| `players[p].speed_air_x_self`            | `…post.velocities.self_x_air` (slp 3.5+)                   |
+| `players[p].speed_y_self`                | `…post.velocities.self_y`                                  |
+| `players[p].speed_x_attack`              | `…post.velocities.knockback_x`                             |
+| `players[p].speed_y_attack`              | `…post.velocities.knockback_y`                             |
+| `players[p].speed_ground_x_self`         | `…post.velocities.self_x_ground`                           |
+| `players[p].nana`                        | `ports[p].follower`                                        |
+| `players[p].cursor`                      | `online.cursors[p]`                                        |
+| `players[p].coin_down`                   | `online.coin_down[p]`                                      |
+| `players[p].controller_status`           | `online.controller_status[p]`                              |
+| `players[p].character_selected`          | `online.character_selected[p]`                             |
+| `players[p].is_holding_cpu_slider`       | `online.is_holding_cpu_slider[p]`                          |
+| `players[p].costume`                     | `game_start.players[p].costume`                            |
+| `players[p].cpu_level`                   | `game_start.players[p].cpu_level`                          |
+| `players[p].team_id`                     | `game_start.players[p].team`                               |
+| `players[p].nickName`                    | `game_start.players[p].name_tag`                           |
+| `players[p].connectCode`                 | `game_start.players[p].connect_code`                       |
+| `players[p].displayName`                 | `game_start.players[p].display_name`                       |
+| `players[p].off_stage`                   | DERIVE locally — heuristic, not in canonical               |
+| `players[p].iasa`                        | DROPPED (heuristic)                                        |
+| `players[p].moonwalkwarning`             | DERIVE locally — heuristic, not in canonical               |
+| `gamestate.menu_state`                   | `online.menu_state`                                        |
+| `gamestate.submenu`                      | `online.submenu`                                           |
+| `gamestate.menu_selection`               | `online.menu_selection`                                    |
+| `gamestate.ready_to_start`               | `online.ready_to_start`                                    |
+| `gamestate.startAt`                      | `online.started_at`                                        |
+| `gamestate.playedOn`                     | `online.played_on`                                         |
+| `gamestate.consoleNick`                  | `online.console_nick`                                      |
+| `gamestate.frame`                        | `_canonical.id` (or `to_canonical_dict()['id']`)           |
+| `gamestate.projectiles`                  | `_canonical.items`                                         |
+| `Projectile`                             | `Item`                                                     |
+| `projectile.speed`                       | `item.velocity`                                            |
+| `projectile.spawn_id`                    | `item.id`                                                  |
+| `projectile.expiration_frames`           | `item.timer` (raw float, no truncation)                    |
+| `projectile.subtype`                     | `item.misc[0]` (slp 3.2+; full 4-tuple)                    |
+| `projectile.owner` (1=port1, 0=unowned)  | `item.owner` (slp 3.6+: 0=port1, -1=unowned; None on older) |
+
+The legacy `PlayerState` attributes are still populated alongside the canonical
+state for backward compatibility. They are derived from the canonical `Post` /
+`Pre` dataclasses so there is no longer a divergence risk between the two
+representations.
+
+**Deferred** (planned for a follow-up): controller input API flip from `[0, 1]`
+to `[-1, 1]` (`tilt_analog`, `simple_press`, `ControllerState.main_stick`),
+`framedata.py` consumer migration to the canonical tree, and the peppi crate
+fork that wires ECB through the post-frame parser.
+
+### Tests
+
+`test.py` covers legacy `PlayerState` parsing on two checked-in slp files.
+`test_canonical.py` covers the canonical schema: byte-reader unit tests
+across slp version cliffs, `to_canonical_dict()` shape, end-to-end on the
+fixtures below, and a `PeppiParity` class that asserts strict dict equality
+against `peppi_py.read_frame_dicts` (skipped when peppi-py is absent):
+
+```sh
+python3 -m unittest test test_canonical
+```
+
+`test_artifacts/` holds small clipped fixtures (~200 KiB each) covering
+the paths that have historically broken parity:
+
+| Fixture | Path it exercises |
+|---|---|
+| `test_game_1.slp` | slp 3.6.1 with rollbacks; default smoke test |
+| `test_game_2.slp` | slp 2.0.1 — old-version Optionals stay None |
+| `fixture_ic_fod.slp` | Ice Climbers + Fountain of Dreams across a Nana death — exercises follower-validity bitmap |
+| `fixture_ic_dl.slp` | Ice Climbers + Dreamland across a Nana death |
+
+Use `peppi-py/scripts/clip_slp.py` to produce new clips. Pick a frame range
+that crosses the boundary you care about (Nana death, rollback burst, stage
+transformation) so the clip is small but exercises the code path end-to-end.
+
 ## OpenAI Gym
 libmelee is inspired by, but not exactly conforming to, the OpenAI Gym API.

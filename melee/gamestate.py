@@ -1,7 +1,7 @@
 """ Gamestate is a single snapshot in time of the game that represents all necessary information
         to make gameplay decisions
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Optional
 
@@ -64,6 +64,182 @@ class StadiumTransformation:
     event: StadiumTransformationEvent = StadiumTransformationEvent.FINISHED
     type: StadiumTransformationType = StadiumTransformationType.NORMAL
 
+# ────────────────────────────────────────────────────────────────────────
+# Canonical schema (mirrors peppi-py's read_frame_dicts output verbatim).
+# These dataclasses are the source of truth for GameState.to_canonical_dict().
+# Field names, ordering, and types match peppi::frame::transpose so that
+# online libmelee and offline peppi produce byte-for-byte identical dicts.
+# ────────────────────────────────────────────────────────────────────────
+
+@dataclass(slots=True)
+class Velocity:
+    x: float = 0.0
+    y: float = 0.0
+
+@dataclass(slots=True)
+class Velocities:
+    self_x_air: float = 0.0
+    self_y: float = 0.0
+    knockback_x: float = 0.0
+    knockback_y: float = 0.0
+    self_x_ground: float = 0.0
+
+@dataclass(slots=True)
+class TriggersPhysical:
+    l: float = 0.0
+    r: float = 0.0
+
+@dataclass(slots=True)
+class Pre:
+    random_seed: int = 0
+    state: int = 0                                    # raw u16
+    position: Position = field(default_factory=Position)
+    direction: float = 0.0                            # raw f32, NOT bool
+    joystick: Position = field(default_factory=Position)   # range [-1, 1]
+    cstick: Position = field(default_factory=Position)     # range [-1, 1]
+    triggers: float = 0.0                             # combined [0, 1]
+    buttons: int = 0                                  # u32 processed bitmask
+    buttons_physical: int = 0                         # u16
+    triggers_physical: TriggersPhysical = field(default_factory=TriggersPhysical)
+    raw_analog_x: Optional[int] = None                # slp 1.2+, raw i8
+    percent: Optional[float] = None                   # slp 1.4+
+    raw_analog_y: Optional[int] = None                # slp 3.15+
+    raw_analog_cstick_x: Optional[int] = None         # slp 3.17+
+    raw_analog_cstick_y: Optional[int] = None         # slp 3.17+
+
+@dataclass(slots=True)
+class Post:
+    character: int = 0
+    state: int = 0
+    position: Position = field(default_factory=Position)
+    direction: float = 0.0                            # raw f32
+    percent: float = 0.0
+    shield: float = 60.0
+    last_attack_landed: int = 0
+    combo_count: int = 0
+    last_hit_by: int = 0
+    stocks: int = 0
+    state_age: Optional[float] = None                 # slp 0.2+
+    state_flags: Optional[tuple] = None               # slp 2.0+, 5×u8
+    misc_as: Optional[float] = None                   # slp 2.0+
+    airborne: Optional[int] = None                    # slp 2.0+, raw u8 (0=ground, 1=air)
+    ground: Optional[int] = None                      # slp 2.0+
+    jumps: Optional[int] = None                       # slp 2.0+
+    l_cancel: Optional[int] = None                    # slp 2.0+
+    hurtbox_state: Optional[int] = None               # slp 2.1+, raw u8
+    velocities: Optional[Velocities] = None           # slp 3.5+
+    hitlag: Optional[float] = None                    # slp 3.8+, raw f32
+    animation_index: Optional[int] = None             # slp 3.11+
+    last_hit_by_instance: Optional[int] = None        # slp 3.16+
+    instance_id: Optional[int] = None                 # slp 3.16+
+    # ECB will land here (Optional[CanonicalECB]) once the peppi fork ships
+    # the right byte offsets; legacy playerstate.ecb_* in console.py is
+    # the temporary stand-in until then.
+
+@dataclass(slots=True)
+class Data:
+    pre: Pre = field(default_factory=Pre)
+    post: Post = field(default_factory=Post)
+
+@dataclass(slots=True)
+class PortData:
+    leader: Data = field(default_factory=Data)
+    follower: Optional[Data] = None
+
+@dataclass(slots=True)
+class Item:
+    type: int = 0
+    state: int = 0
+    direction: float = 0.0
+    velocity: Velocity = field(default_factory=Velocity)
+    position: Position = field(default_factory=Position)
+    damage: int = 0
+    timer: float = 0.0
+    id: int = 0
+    misc: Optional[tuple] = None                      # slp 3.2+, 4×u8
+    owner: Optional[int] = None                       # slp 3.6+, raw i8 (-1 unowned, 0..3 port)
+    instance_id: Optional[int] = None                 # slp 3.16+
+
+@dataclass(slots=True)
+class FrameStart:
+    random_seed: int = 0
+    scene_frame_counter: Optional[int] = None         # slp 3.10+
+
+@dataclass(slots=True)
+class FrameEnd:
+    latest_finalized_frame: Optional[int] = None      # slp 3.7+
+
+@dataclass(slots=True)
+class FodPlatform:
+    platform: int = 0
+    height: float = 0.0
+
+@dataclass(slots=True)
+class DreamlandWhispy:
+    direction: int = 0
+
+@dataclass(slots=True)
+class CanonicalStadiumTransformation:
+    event: int = 0
+    type: int = 0
+
+@dataclass(slots=True)
+class StartPlayer:
+    port: int = 0
+    character: int = 0
+    type: int = 0
+    stocks: int = 0
+    costume: int = 0
+    team: Optional[int] = None
+    cpu_level: Optional[int] = None
+    name_tag: str = ""
+    display_name: str = ""
+    connect_code: str = ""
+
+@dataclass(slots=True)
+class GameStart:
+    stage: int = 0
+    is_teams: bool = False
+    slp_version: tuple = (0, 0, 0)
+    players: dict = field(default_factory=dict)        # {port: StartPlayer}
+
+@dataclass(slots=True)
+class OnlineState:
+    """libmelee-only state never present in the canonical per-frame dict."""
+    menu_state: enums.Menu = enums.Menu.IN_GAME
+    submenu: enums.SubMenu = enums.SubMenu.UNKNOWN_SUBMENU
+    menu_selection: int = 0
+    ready_to_start: bool = False
+    is_frozen_ps: bool = False
+    cursors: dict = field(default_factory=dict)               # {port: Position}
+    coin_down: dict = field(default_factory=dict)             # {port: bool}
+    controller_status: dict = field(default_factory=dict)     # {port: enums.ControllerStatus}
+    character_selected: dict = field(default_factory=dict)    # {port: enums.Character}
+    is_holding_cpu_slider: dict = field(default_factory=dict) # {port: bool}
+    started_at: str = ""
+    played_on: str = ""
+    console_nick: str = ""
+
+@dataclass(slots=True)
+class CanonicalFrame:
+    """The per-frame data that to_canonical_dict() serializes.
+
+    Lives on GameState as `_canonical` while the legacy PlayerState tree is
+    still around. Once consumers migrate, this becomes the only state.
+    """
+    id: int = 0
+    start: Optional[FrameStart] = None
+    end: Optional[FrameEnd] = None
+    ports: dict = field(default_factory=dict)         # {port: PortData}
+    # `items` stays None for slp <3.0 (the version that introduced item events)
+    # and is initialized to [] at FRAME_START for slp 3.0+ so frames with no
+    # items still emit an empty list — matching peppi's Option<Vec<Item>>.
+    items: Optional[list] = None                      # [Item] | None
+    fod_platforms: Optional[list] = None              # [FodPlatform]
+    dreamland_whispys: Optional[list] = None          # [DreamlandWhispy]
+    stadium_transformations: Optional[list] = None    # [CanonicalStadiumTransformation]
+
+
 @dataclass(slots=True)
 class GameState:
     """Represents the state of a running game of Melee at a given moment in time"""
@@ -103,6 +279,40 @@ class GameState:
     custom: dict = field(default_factory=dict)
     """(dict): Custom fields to be added by the user"""
 
+    # Canonical-schema state (peppi-py parity). Populated alongside the legacy
+    # PlayerState tree during the migration; will become the only state once
+    # downstream consumers move off the deprecated attributes.
+    _canonical: CanonicalFrame = field(default_factory=CanonicalFrame)
+    online: OnlineState = field(default_factory=OnlineState)
+    game_start: Optional[GameStart] = None
+
+    def to_canonical_dict(self) -> dict:
+        """Return the per-frame dict matching peppi_py.read_frame_dicts.
+
+        Equality with `peppi_py.read_frame_dicts(slp)[i]` is the contract that
+        gates imitation-learning pipelines: training-from-replay (peppi) and
+        acting-online (libmelee) must see byte-for-byte identical observations.
+        See peppi-py/tests/test_libmelee_parity.py for the harness.
+        """
+        return _canon_to_dict(self._canonical)
+
+
+def _canon_to_dict(obj):
+    """Fast canonical-schema serializer; drop-in replacement for asdict.
+
+    Skips asdict's deepcopy of every container — the canonical tree is
+    primitives + dataclasses + list[dataclass] + dict[int, dataclass], so a
+    shallow recursion suffices and the consumer doesn't mutate values.
+    Matters at 60Hz: per-frame dict cost dominates online inference latency.
+    """
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: _canon_to_dict(getattr(obj, f.name)) for f in fields(obj)}
+    if isinstance(obj, list):
+        return [_canon_to_dict(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _canon_to_dict(v) for k, v in obj.items()}
+    return obj
+
 @dataclass(slots=True)
 class UnknownAnimation:
     value: int = -1
@@ -137,8 +347,6 @@ class PlayerState:
     """(int): What frame of the Action is the character in? Indexed from 1."""
     invulnerable: bool = False
     """(bool): Is the player invulnerable?"""
-    invulnerability_left: int = 0
-    """(int): How many frames of invulnerability are left."""
     hitlag_left: int = 0
     """(bool): How many more frames of hitlag there is"""
     hitstun_frames_left: int = 0

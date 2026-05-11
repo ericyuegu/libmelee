@@ -24,10 +24,20 @@ import numpy as np
 import shutil
 import tempfile
 
+from melee import _canonical
 from melee import enums
 from melee.enums import Action
 import melee.gamestate as gamestate_lib
-from melee.gamestate import GameState, Projectile, PlayerState
+from melee.gamestate import (
+	Data as _CanonicalData,
+	GameStart as _CanonicalGameStart,
+	GameState,
+	OnlineState as _CanonicalOnlineState,
+	PlayerState,
+	PortData as _CanonicalPortData,
+	Projectile,
+	StartPlayer as _CanonicalStartPlayer,
+)
 from melee.slippstream import SlippstreamClient, EventType
 from melee.slpfilestreamer import SLPFileStreamer
 from melee import stages
@@ -153,6 +163,22 @@ def default_dolphin_install_path() -> tuple[str, bool]:
 
 def read_byte(event_bytes: bytes, offset: int):
     return np.ndarray((1,), ">B", event_bytes, offset)[0]
+
+
+def _parse_button_bits(button_dict: dict, bits: int) -> None:
+    """Decode a slp button bitmask into a {Button: bool} dict (in place)."""
+    button_dict[enums.Button.BUTTON_A] = bool(bits & 0x0100)
+    button_dict[enums.Button.BUTTON_B] = bool(bits & 0x0200)
+    button_dict[enums.Button.BUTTON_X] = bool(bits & 0x0400)
+    button_dict[enums.Button.BUTTON_Y] = bool(bits & 0x0800)
+    button_dict[enums.Button.BUTTON_START] = bool(bits & 0x1000)
+    button_dict[enums.Button.BUTTON_Z] = bool(bits & 0x0010)
+    button_dict[enums.Button.BUTTON_R] = bool(bits & 0x0020)
+    button_dict[enums.Button.BUTTON_L] = bool(bits & 0x0040)
+    button_dict[enums.Button.BUTTON_D_LEFT] = bool(bits & 0x0001)
+    button_dict[enums.Button.BUTTON_D_RIGHT] = bool(bits & 0x0002)
+    button_dict[enums.Button.BUTTON_D_DOWN] = bool(bits & 0x0004)
+    button_dict[enums.Button.BUTTON_D_UP] = bool(bits & 0x0008)
 
 def read_shift_jis(event_bytes: bytes, offset: int):
     end = offset
@@ -334,6 +360,7 @@ class Console:
                  polling_mode: bool = False,
                  polling_timeout: float = 0,
                  skip_rollback_frames: bool = True,
+                 rollback_resolution: str = 'first',
                  allow_old_version: bool = False,
                  logger=None,
                  setup_gecko_codes: bool = True,
@@ -376,6 +403,13 @@ class Console:
                 When set, step() will always return immediately, but may be None if no
                 gamestate is available yet.
             polling_timeout (float): In polling_mode, how long to wait for.
+            rollback_resolution (str): Which post-frame emission to surface for a frame
+                that Slippi rollback re-emits. 'first' (default) yields the predicted
+                state — what an online bot would have acted on. 'last' yields the
+                corrected state — matches peppi-py and the on-disk replay's final truth.
+                Use 'last' when comparing against peppi or when training on canonical
+                post-rollback truth; use 'first' for input/output parity with online play.
+                Only meaningful when skip_rollback_frames=True.
             allow_old_version (bool): Allow SLP versions older than 3.0.0 (rollback era)
                 Only enable if you know what you're doing. You probably don't want this.
                 Gamestates will be missing key information, come in really late, or possibly not work at all
@@ -432,6 +466,9 @@ class Console:
         self._polling_mode = polling_mode
         self._polling_timeout = polling_timeout
         self.skip_rollback_frames = skip_rollback_frames
+        if rollback_resolution not in ('first', 'last'):
+            raise ValueError(f"rollback_resolution must be 'first' or 'last', got {rollback_resolution!r}")
+        self.rollback_resolution = rollback_resolution
         self.slp_version_tuple: Optional[tuple[int, int, int]] = None
         """(str): The SLP version this stream/file currently is."""
         self._allow_old_version = allow_old_version
@@ -442,6 +479,10 @@ class Console:
         self._is_teams = False
         self._display_names: dict[int, str] = {}
         self._connect_codes: dict[int, str] = {}
+
+        # Single per-game instances; step() attaches them to each gamestate.
+        self._game_start: Optional[_CanonicalGameStart] = None
+        self._online_state: _CanonicalOnlineState = _CanonicalOnlineState()
 
         # Stage-specific state tracking
         self._fod_platforms: Optional[gamestate_lib.FoDPlatforms] = None
@@ -924,10 +965,15 @@ class Console:
         elif self._current_stage is enums.Stage.POKEMON_STADIUM:
             gamestate.stadium_transformation = self._stadium_transformation
 
-        # Insert some metadata into the gamestate
+        # Insert some metadata into the gamestate (legacy + canonical mirror).
         gamestate.playedOn = self._slippstream.playedOn
         gamestate.startAt = self._slippstream.timestamp
         gamestate.consoleNick = self._slippstream.consoleNick
+        self._online_state.played_on = self._slippstream.playedOn
+        self._online_state.started_at = self._slippstream.timestamp
+        self._online_state.console_nick = self._slippstream.consoleNick
+        gamestate.online = self._online_state
+        gamestate.game_start = self._game_start
         for i, names in self._slippstream.players.items():
             try:
                 gamestate.players[int(i)+1].nickName = names["names"]["netplay"]
@@ -1007,7 +1053,13 @@ class Console:
                 return self._use_manual_bookends
 
             elif event_type == EventType.FRAME_START:
-                pass
+                # slp >= 2.2 only. _canonical.id gets re-set in PRE_FRAME for
+                # the every-version path, so we don't bother setting it here.
+                gamestate.frame = int(np.ndarray((1,), ">i", event_bytes, 0x1)[0])
+                gamestate._canonical.start = _canonical.read_frame_start(
+                    event_bytes, self.slp_version_tuple)
+                for name in _canonical.event_list_names(self.slp_version_tuple):
+                    setattr(gamestate._canonical, name, [])
 
             elif event_type == EventType.PRE_FRAME:
                 self.__pre_frame(gamestate, event_bytes)
@@ -1026,8 +1078,11 @@ class Console:
                 if len(event_bytes) > event_size:
                     logging.warning("Unprocessed data left after frame bookend.")
 
-                # If this is an old frame, then don't return it.
-                if gamestate.frame <= self._frame and self.skip_rollback_frames:
+                # Rollback re-emit: 'first' drops the corrected re-emit,
+                # 'last' yields it (consumers must overwrite the stale
+                # snapshot — dict-keyed-by-frame-id consumers do so naturally).
+                is_rollback_reemit = gamestate.frame <= self._frame
+                if is_rollback_reemit and self.skip_rollback_frames and self.rollback_resolution == 'first':
                     # In blocking mode we still need to flush the controllers
                     # on rollback frames, otherwise the game will hang.
                     if self.blocking_input:
@@ -1037,7 +1092,8 @@ class Console:
                     self._temp_gamestate = GameState()
                     self._events_this_frame = []
                     return False
-                self._frame = gamestate.frame
+                if not is_rollback_reemit:
+                    self._frame = gamestate.frame
                 return True
 
             elif event_type == EventType.ITEM_UPDATE:
@@ -1112,8 +1168,50 @@ class Console:
                 connect_code = read_shift_jis(event_bytes, 0x221 + 0xA * i)
                 self._connect_codes[i] = connect_code.replace(shift_jis_hash, '#')
 
+        self._build_canonical_game_start(event_bytes)
+        if self.slp_version_tuple >= (2, 0, 0):
+            self._online_state.is_frozen_ps = self.is_frozen_ps
+
+    def _build_canonical_game_start(self, event_bytes: bytes):
+        try:
+            stage = int(np.ndarray((1,), ">H", event_bytes, 0x13)[0])
+        except (TypeError, ValueError):
+            stage = 0
+        players: dict[int, _CanonicalStartPlayer] = {}
+        for i in range(4):
+            ptype = int(np.ndarray((1,), ">B", event_bytes, 0x66 + (0x24 * i))[0])
+            # PlayerType 3 == empty slot; skip it.
+            if ptype == 3:
+                continue
+            character = int(np.ndarray((1,), ">B", event_bytes, 0x65 + (0x24 * i))[0])
+            stocks = int(np.ndarray((1,), ">B", event_bytes, 0x67 + (0x24 * i))[0])
+            costume = int(self._costumes[i])
+            team = int(self._team_id[i]) if self._is_teams else None
+            cpu_level = int(self._cpu_level[i]) if ptype == 1 else None
+            players[i + 1] = _CanonicalStartPlayer(
+                port=i + 1,
+                character=character,
+                type=ptype,
+                stocks=stocks,
+                costume=costume,
+                team=team,
+                cpu_level=cpu_level,
+                name_tag='',
+                display_name=self._display_names.get(i, ''),
+                connect_code=self._connect_codes.get(i, ''),
+            )
+        self._game_start = _CanonicalGameStart(
+            stage=stage,
+            is_teams=self._is_teams,
+            slp_version=self.slp_version_tuple or (0, 0, 0),
+            players=players,
+        )
+
     def __pre_frame(self, gamestate: GameState, event_bytes):
-        gamestate.frame = np.ndarray((1,), ">i", event_bytes, 0x1)[0]
+        # Cast np.int32 → Python int so downstream dict equality vs peppi
+        # (which emits Python int) holds without per-callsite re-casting.
+        gamestate.frame = int(np.ndarray((1,), ">i", event_bytes, 0x1)[0])
+        gamestate._canonical.id = gamestate.frame
 
         # Grab the physical controller state and put that into the controller state
         controller_port = np.ndarray((1,), ">B", event_bytes, 0x5)[0] + 1
@@ -1131,56 +1229,33 @@ class Console:
         playerstate.cpu_level = self._cpu_level[controller_port-1]
         playerstate.team_id = self._team_id[controller_port-1]
 
+        port = int(controller_port)
+        is_nana = event_bytes[0x6] == 1
+        pre = _canonical.read_pre(event_bytes, self.slp_version_tuple)
+        if port not in gamestate._canonical.ports:
+            gamestate._canonical.ports[port] = _CanonicalPortData()
+        pd = gamestate._canonical.ports[port]
+        if is_nana:
+            if pd.follower is None:
+                pd.follower = _CanonicalData()
+            pd.follower.pre = pre
+        else:
+            pd.leader.pre = pre
+
         controller_state = playerstate.controller_state
+        # Legacy main_stick / c_stick are in [0, 1]; canonical is in [-1, 1].
+        controller_state.main_stick = ((pre.joystick.x + 1) / 2, (pre.joystick.y + 1) / 2)
+        controller_state.c_stick = ((pre.cstick.x + 1) / 2, (pre.cstick.y + 1) / 2)
+        controller_state.raw_main_stick = (
+            pre.raw_analog_x if pre.raw_analog_x is not None else 0,
+            pre.raw_analog_y if pre.raw_analog_y is not None else 0,
+        )
+        # The game interprets both shoulders together; legacy splits them.
+        controller_state.l_shoulder = pre.triggers
+        controller_state.r_shoulder = pre.triggers
 
-        main_x = (np.ndarray((1,), ">f", event_bytes, 0x19)[0] / 2) + 0.5
-        main_y = (np.ndarray((1,), ">f", event_bytes, 0x1D)[0] / 2) + 0.5
-        controller_state.main_stick = (main_x, main_y)
-
-        c_x = (np.ndarray((1,), ">f", event_bytes, 0x21)[0] / 2) + 0.5
-        c_y = (np.ndarray((1,), ">f", event_bytes, 0x25)[0] / 2) + 0.5
-        controller_state.c_stick = (c_x, c_y)
-
-        raw_main_x = 0  # Added in 1.2.0
-        raw_main_y = 0  # Added in 3.15.0
-        try:
-            raw_main_x = int(np.ndarray((1,), ">b", event_bytes, 0x3B)[0])
-        except TypeError:
-            pass
-        try:
-            raw_main_y = int(np.ndarray((1,), ">b", event_bytes, 0x40)[0])
-        except TypeError:
-            pass
-        controller_state.raw_main_stick = (raw_main_x, raw_main_y)
-
-        # The game interprets both shoulders together, so the processed value will always be the same
-        trigger = (np.ndarray((1,), ">f", event_bytes, 0x29)[0])
-        controller_state.l_shoulder = trigger
-        controller_state.r_shoulder = trigger
-
-        def parse_button_bits(button: dict, bits: int) -> int:
-            button[enums.Button.BUTTON_A] = bool(bits & 0x0100)
-            button[enums.Button.BUTTON_B] = bool(bits & 0x0200)
-            button[enums.Button.BUTTON_X] = bool(bits & 0x0400)
-            button[enums.Button.BUTTON_Y] = bool(bits & 0x0800)
-            button[enums.Button.BUTTON_START] = bool(bits & 0x1000)
-            button[enums.Button.BUTTON_Z] = bool(bits & 0x0010)
-            button[enums.Button.BUTTON_R] = bool(bits & 0x0020)
-            button[enums.Button.BUTTON_L] = bool(bits & 0x0040)
-            button[enums.Button.BUTTON_D_LEFT] = bool(bits & 0x0001)
-            button[enums.Button.BUTTON_D_RIGHT] = bool(bits & 0x0002)
-            button[enums.Button.BUTTON_D_DOWN] = bool(bits & 0x0004)
-            button[enums.Button.BUTTON_D_UP] = bool(bits & 0x0008)
-
-        # physical buttons
-        parse_button_bits(
-            controller_state.button,
-            int(np.ndarray((1,), ">H", event_bytes, 0x31)[0]))
-
-        # processed buttons
-        button_bits = int(np.ndarray((1,), ">I", event_bytes, 0x2D)[0])
-        parse_button_bits(controller_state.processed_button, button_bits)
-        # there are a few more things in the processed buttons
+        _parse_button_bits(controller_state.button, pre.buttons_physical)
+        _parse_button_bits(controller_state.processed_button, pre.buttons)
 
         if self._use_manual_bookends:
             self._frame = gamestate.frame
@@ -1189,102 +1264,73 @@ class Console:
         gamestate.stage = self._current_stage
         gamestate.is_teams = self._is_teams
         assert gamestate.frame == np.ndarray((1,), ">i", event_bytes, 0x1)[0]
-        controller_port = np.ndarray((1,), ">B", event_bytes, 0x5)[0] + 1
+        controller_port = int(np.ndarray((1,), ">B", event_bytes, 0x5)[0]) + 1
 
         if controller_port not in gamestate.players:
             gamestate.players[controller_port] = PlayerState()
         playerstate = gamestate.players[controller_port]
 
-        # Is this Nana?
-        if np.ndarray((1,), ">B", event_bytes, 0x6)[0] == 1:
+        is_nana = np.ndarray((1,), ">B", event_bytes, 0x6)[0] == 1
+        if is_nana:
             playerstate.nana = PlayerState()
             playerstate = playerstate.nana
 
-        playerstate.position.x = np.ndarray((1,), ">f", event_bytes, 0xa)[0]
-        playerstate.position.y = np.ndarray((1,), ">f", event_bytes, 0xe)[0]
+        post = _canonical.read_post(event_bytes, self.slp_version_tuple)
+        if controller_port not in gamestate._canonical.ports:
+            gamestate._canonical.ports[controller_port] = _CanonicalPortData()
+        pd = gamestate._canonical.ports[controller_port]
+        if is_nana:
+            if pd.follower is None:
+                pd.follower = _CanonicalData()
+            pd.follower.post = post
+        else:
+            pd.leader.post = post
 
-        playerstate.character = enums.Character(np.ndarray((1,), ">B", event_bytes, 0x7)[0])
-        action_value = np.ndarray((1,), ">H", event_bytes, 0x8)[0]
+        # Derive legacy PlayerState fields from the canonical Post.
+        playerstate.position.x = post.position.x
+        playerstate.position.y = post.position.y
         try:
-            playerstate.action = enums.Action(action_value)
+            playerstate.character = enums.Character(post.character)
         except ValueError:
-            playerstate.action = gamestate_lib.UnknownAnimation(action_value)
-
-        # Melee stores this in a float for no good reason. So we have to convert
-        playerstate.facing = np.ndarray((1,), ">f", event_bytes, 0x12)[0] > 0
-
-        playerstate.percent = np.ndarray((1,), ">f", event_bytes, 0x16)[0]
-        playerstate.shield_strength = np.ndarray((1,), ">f", event_bytes, 0x1A)[0]
-        playerstate.stock = np.ndarray((1,), ">B", event_bytes, 0x21)[0]
-        playerstate.action_frame = int(np.ndarray((1,), ">f", event_bytes, 0x22)[0])
-
+            playerstate.character = enums.Character.UNKNOWN_CHARACTER
         try:
-            sb4 = int(np.ndarray((1,), ">B", event_bytes, 0x29)[0])
-            playerstate.is_powershield = (sb4 & 0x20) == 0x20
-        except TypeError:
-            playerstate.is_powershield = False
-
-        try:
-            playerstate.hitstun_frames_left = int(np.ndarray((1,), ">f", event_bytes, 0x2B)[0])
-        except TypeError:
-            playerstate.hitstun_frames_left = 0
+            playerstate.action = enums.Action(post.state)
         except ValueError:
-            playerstate.hitstun_frames_left = 0
-        try:
-            playerstate.on_ground = not bool(np.ndarray((1,), ">B", event_bytes, 0x2F)[0])
-        except TypeError:
-            playerstate.on_ground = True
-        try:
-            playerstate.jumps_left = np.ndarray((1,), ">B", event_bytes, 0x32)[0]
-        except TypeError:
-            playerstate.jumps_left = 1
-
-        try:
-            playerstate.invulnerable = int(np.ndarray((1,), ">B", event_bytes, 0x34)[0]) != 0
-        except TypeError:
-            playerstate.invulnerable = False
-
-        try:
-            playerstate.speed_air_x_self = np.ndarray((1,), ">f", event_bytes, 0x35)[0]
-        except TypeError:
+            playerstate.action = gamestate_lib.UnknownAnimation(post.state)
+        playerstate.facing = post.direction > 0
+        playerstate.percent = post.percent
+        playerstate.shield_strength = post.shield
+        playerstate.stock = post.stocks
+        playerstate.action_frame = int(post.state_age) if post.state_age is not None else 0
+        playerstate.is_powershield = bool(post.state_flags and (post.state_flags[3] & 0x20))
+        playerstate.hitstun_frames_left = int(post.misc_as) if post.misc_as is not None else 0
+        playerstate.on_ground = (not post.airborne) if post.airborne is not None else True
+        playerstate.jumps_left = post.jumps if post.jumps is not None else 1
+        playerstate.invulnerable = bool(post.hurtbox_state) if post.hurtbox_state is not None else False
+        if post.velocities is not None:
+            playerstate.speed_air_x_self = post.velocities.self_x_air
+            playerstate.speed_y_self = post.velocities.self_y
+            playerstate.speed_x_attack = post.velocities.knockback_x
+            playerstate.speed_y_attack = post.velocities.knockback_y
+            playerstate.speed_ground_x_self = post.velocities.self_x_ground
+        else:
             playerstate.speed_air_x_self = 0
-
-        try:
-            playerstate.speed_y_self = np.ndarray((1,), ">f", event_bytes, 0x39)[0]
-        except TypeError:
             playerstate.speed_y_self = 0
-
-        try:
-            playerstate.speed_x_attack = np.ndarray((1,), ">f", event_bytes, 0x3D)[0]
-        except TypeError:
             playerstate.speed_x_attack = 0
-
-        try:
-            playerstate.speed_y_attack = np.ndarray((1,), ">f", event_bytes, 0x41)[0]
-        except TypeError:
             playerstate.speed_y_attack = 0
-
-        try:
-            playerstate.speed_ground_x_self = np.ndarray((1,), ">f", event_bytes, 0x45)[0]
-        except TypeError:
             playerstate.speed_ground_x_self = 0
-
-        try:
-            playerstate.hitlag_left = int(np.ndarray((1,), ">f", event_bytes, 0x49)[0])
-        except TypeError:
-            playerstate.hitlag_left = 0
+        playerstate.hitlag_left = int(post.hitlag) if post.hitlag is not None else 0
 
         # The pre-warning occurs when we first start a dash dance.
         if controller_port in self._prev_gamestate.players:
             if playerstate.action == Action.DASHING and \
                     self._prev_gamestate.players[controller_port].action not in [Action.DASHING, Action.TURNING]:
                 playerstate.moonwalkwarning = True
-
-        # Take off the warning if the player does an action other than dashing
         if playerstate.action != Action.DASHING:
             playerstate.moonwalkwarning = False
 
-        # "off_stage" helper
+        # "off_stage" helper (kept for backcompat; consumers should derive it
+        # themselves from canonical position/airborne).
         try:
             if (abs(playerstate.position.x) > stages.EDGE_GROUND_POSITION[gamestate.stage] or \
                     playerstate.position.y < -6) and not playerstate.on_ground:
@@ -1294,73 +1340,32 @@ class Console:
         except KeyError:
             playerstate.off_stage = False
 
-        # ECB top edge, x
-        ecb_top_x = 0
-        ecb_top_y = 0
-        try:
-            ecb_top_x = np.ndarray((1,), ">f", event_bytes, 0x4D)[0]
-        except TypeError:
-            ecb_top_x = 0
-        # ECB Top edge, y
-        try:
-            ecb_top_y = np.ndarray((1,), ">f", event_bytes, 0x51)[0]
-        except TypeError:
-            ecb_top_y = 0
-        playerstate.ecb.top.x = ecb_top_x
-        playerstate.ecb.top.y = ecb_top_y
-        playerstate.ecb_top = (ecb_top_x, ecb_top_y)
+        # Legacy ECB reads at 0x4D-0x69 collide with animation_index /
+        # last_hit_by_instance / instance_id on slp 3.11+, so values are
+        # garbage on modern replays. Kept for backcompat with playerstate.ecb_*
+        # until canonical Post.ecb lands (peppi fork TODO).
+        for label, off_x, off_y in (
+            ('top',    0x4D, 0x51),
+            ('bottom', 0x55, 0x59),
+            ('left',   0x5D, 0x61),
+            ('right',  0x65, 0x69),
+        ):
+            try:
+                ex = np.ndarray((1,), ">f", event_bytes, off_x)[0]
+                ey = np.ndarray((1,), ">f", event_bytes, off_y)[0]
+            except TypeError:
+                ex = ey = 0
+            edge = getattr(playerstate.ecb, label)
+            edge.x = ex
+            edge.y = ey
+            setattr(playerstate, f'ecb_{label}', (ex, ey))
 
-        # ECB bottom edge, x coord
-        ecb_bot_x = 0
-        ecb_bot_y = 0
-        try:
-            ecb_bot_x = np.ndarray((1,), ">f", event_bytes, 0x55)[0]
-        except TypeError:
-            ecb_bot_x = 0
-        # ECB Bottom edge, y coord
-        try:
-            ecb_bot_y = np.ndarray((1,), ">f", event_bytes, 0x59)[0]
-        except TypeError:
-            ecb_bot_y = 0
-        playerstate.ecb.bottom.x = ecb_bot_x
-        playerstate.ecb.bottom.y = ecb_bot_y
-        playerstate.ecb_bottom = (ecb_bot_x, ecb_bot_y)
-
-        # ECB left edge, x coord
-        ecb_left_x = 0
-        ecb_left_y = 0
-        try:
-            ecb_left_x = np.ndarray((1,), ">f", event_bytes, 0x5D)[0]
-        except TypeError:
-            ecb_left_x = 0
-        # ECB left edge, y coord
-        try:
-            ecb_left_y = np.ndarray((1,), ">f", event_bytes, 0x61)[0]
-        except TypeError:
-            ecb_left_y = 0
-        playerstate.ecb.left.x = ecb_left_x
-        playerstate.ecb.left.y = ecb_left_y
-        playerstate.ecb_left = (ecb_left_x, ecb_left_y)
-
-        # ECB right edge, x coord
-        ecb_right_x = 0
-        ecb_right_y = 0
-        try:
-            ecb_right_x = np.ndarray((1,), ">f", event_bytes, 0x65)[0]
-        except TypeError:
-            ecb_right_x = 0
-        # ECB right edge, y coord
-        try:
-            ecb_right_y = np.ndarray((1,), ">f", event_bytes, 0x69)[0]
-        except TypeError:
-            ecb_right_y = 0
-        playerstate.ecb.right.x = ecb_right_x
-        playerstate.ecb.right.y = ecb_right_y
-        playerstate.ecb_right = (ecb_right_x, ecb_right_y)
         if self._use_manual_bookends:
             self._frame = gamestate.frame
 
     def __frame_bookend(self, gamestate: GameState, event_bytes: bytes):
+        gamestate._canonical.end = _canonical.read_frame_end(
+            event_bytes, self.slp_version_tuple)
         self._prev_gamestate = gamestate
         # Calculate helper distance variable
         #   This is a bit kludgey.... :/
@@ -1416,6 +1421,9 @@ class Console:
 
         # Add the projectile to the gamestate list
         gamestate.projectiles.append(projectile)
+
+        gamestate._canonical.items.append(
+            _canonical.read_item(event_bytes, self.slp_version_tuple))
 
     def __handle_slippstream_menu_event(self, event_bytes, gamestate: GameState):
         """ Internal handler for slippstream menu events
@@ -1588,6 +1596,21 @@ class Console:
             if gamestate.players[port].controller_status != enums.ControllerStatus.CONTROLLER_CPU:
                 gamestate.players[port].cpu_level = 0
 
+        # Mirror legacy menu attrs onto the canonical OnlineState; step()
+        # attaches the singleton to gamestate.online before returning.
+        from melee.gamestate import Position as _Pos
+        os = self._online_state
+        os.menu_state = gamestate.menu_state
+        os.submenu = gamestate.submenu
+        os.menu_selection = gamestate.menu_selection
+        os.ready_to_start = gamestate.ready_to_start
+        for port, p in gamestate.players.items():
+            os.cursors[port] = _Pos(p.cursor.x, p.cursor.y)
+            os.coin_down[port] = p.coin_down
+            os.controller_status[port] = p.controller_status
+            os.character_selected[port] = p.character_selected
+            os.is_holding_cpu_slider[port] = p.is_holding_cpu_slider
+
     def __fod_platforms(self, gamestate: GameState, event_bytes: bytes):
         if self._fod_platforms is None:
             raise ValueError("Fountain of Dreams platforms not initialized")
@@ -1602,12 +1625,18 @@ class Console:
         else:
             raise ValueError("Unknown FoD platform type: {}".format(platform))
 
+        gamestate._canonical.fod_platforms.append(
+            _canonical.read_fod_platform(event_bytes, self.slp_version_tuple))
+
     def __whispy_blow(self, gamestate: GameState, event_bytes: bytes):
         if self._whispy is None:
             raise ValueError("Whispy not initialized")
 
         direction = np.ndarray((1,), ">B", event_bytes, 0x5)[0]
         self._whispy = gamestate_lib.WhispyBlowDirection(direction)
+
+        gamestate._canonical.dreamland_whispys.append(
+            _canonical.read_dreamland_whispy(event_bytes, self.slp_version_tuple))
 
     def __stadium_transformation(self, gamestate: GameState, event_bytes: bytes):
         if self._stadium_transformation is None:
@@ -1623,6 +1652,9 @@ class Console:
 
         self._stadium_transformation.type = gamestate_lib.StadiumTransformationType(
             np.ndarray((1,), ">H", event_bytes, 0x7)[0])
+
+        gamestate._canonical.stadium_transformations.append(
+            _canonical.read_stadium_transformation(event_bytes, self.slp_version_tuple))
 
     def __fixframeindexing(self, gamestate: GameState):
         """ Melee's indexing of action frames is wildly inconsistent.
