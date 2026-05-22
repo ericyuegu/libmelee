@@ -824,8 +824,7 @@ class Console:
         extra_codes = []
         if self.infinite_time:
             extra_codes.append("$Optional: Infinite Time Mode")
-        # if self.instant_match_restart:
-        if True:
+        if self.instant_match_restart:
             extra_codes.append("$Optional: Instant Match")
         if self.use_exi_inputs:
             extra_codes.append("$Optional: Allow Bot Input Overrides")
