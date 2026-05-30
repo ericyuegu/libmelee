@@ -513,52 +513,57 @@ class MenuHelper():
         if stage == enums.Stage.RANDOM_STAGE:
             target_x, target_y = -13.5, 3.5
 
-        #Wiggle room in positioning cursor
+        # Commit window — kept tight because A only selects the stage when the
+        # cursor is genuinely on the icon; a wider window commits + holds A over
+        # empty space and hangs forever.
         wiggleroom = 1.5
 
-        #Move up if we're too low
-        if gamestate.players[controller.port].cursor.y < target_y - wiggleroom:
-            controller.release_button(enums.Button.BUTTON_A)
-            controller.tilt_analog(enums.Button.BUTTON_MAIN, .5, 1)
-            return
-        #Move downn if we're too high
-        if gamestate.players[controller.port].cursor.y > target_y + wiggleroom:
-            controller.release_button(enums.Button.BUTTON_A)
-            controller.tilt_analog(enums.Button.BUTTON_MAIN, .5, 0)
-            return
-        #Move right if we're too left
-        if gamestate.players[controller.port].cursor.x < target_x - wiggleroom:
-            controller.release_button(enums.Button.BUTTON_A)
-            controller.tilt_analog(enums.Button.BUTTON_MAIN, 1, .5)
-            return
-        #Move left if we're too right
-        if gamestate.players[controller.port].cursor.x > target_x + wiggleroom:
-            controller.release_button(enums.Button.BUTTON_A)
-            controller.tilt_analog(enums.Button.BUTTON_MAIN, 0, .5)
+        cursor = gamestate.players[controller.port].cursor
+        on_target = abs(target_x - cursor.x) <= wiggleroom and abs(target_y - cursor.y) <= wiggleroom
+
+        # Once the cursor first reaches the target stage, commit: neutralize the
+        # stick and hold A. Re-entering navigation on a single-frame cursor wobble
+        # is what lets the bang-bang controller orbit the stage forever under load
+        # (frame-delivery jitter) — frames_on_stage > 0 latches that we've arrived.
+        if on_target or self.frames_on_stage > 0:
+            self.frames_on_stage += 1
+            controller.tilt_analog(enums.Button.BUTTON_MAIN, 0.5, 0.5)
+
+            # Empirically, Frozen Stadium can be toggled while the cursor is on any
+            # stage; toggle once at the first opportunity and leave it.
+            if frozen_stadium != self.frozen_stadium_selected:
+                if self.frames_on_stage == 30:
+                    controller.press_button(enums.Button.BUTTON_Z)
+                elif self.frames_on_stage == 40:
+                    controller.release_button(enums.Button.BUTTON_Z)
+                if self.frames_on_stage < 60:
+                    return
+                else:
+                    self.frozen_stadium_selected = frozen_stadium
+
+            controller.press_button(enums.Button.BUTTON_A)
+            self.stage_selected = True
             return
 
-        #If we get in the right area, press A
-        controller.tilt_analog(enums.Button.BUTTON_MAIN, 0.5, 0.5)
-        self.frames_on_stage += 1
+        # Proportional approach: stick deflection shrinks as the cursor nears the
+        # target so it decelerates into the wiggle window instead of full-tilt
+        # overshooting and limit-cycling around it. Magnitude is clamped above
+        # Melee's analog deadzone so the cursor still creeps when close.
+        def _deflect(delta):
+            if abs(delta) <= wiggleroom:
+                return 0.5
+            # Deflection grows with distance (full-tilt far, gentle near) so the
+            # cursor decelerates into the tight commit window instead of full-tilt
+            # overshooting and orbiting it. Floor stays above Melee's analog
+            # deadzone so the cursor still creeps when close.
+            magnitude = min(0.5, 0.30 + (abs(delta) - wiggleroom) * 0.05)
+            return 0.5 + math.copysign(magnitude, delta)
 
-        # Empirically, it seems that we can toggle Frozen Stadium when the
-        # cursor is on any stage. So, we toggle at the first opportunity and
-        # leave it like that, whether or not we're currently selecting Stadium.
-        # This has the advantage of working even if we only pick Random.
-        if frozen_stadium != self.frozen_stadium_selected:
-            # Frame numbers here are probably quite loose.
-            if self.frames_on_stage == 30:
-                controller.press_button(enums.Button.BUTTON_Z)
-            elif self.frames_on_stage == 40:
-                controller.release_button(enums.Button.BUTTON_Z)
-
-            if self.frames_on_stage < 60:
-                return
-            else:
-                self.frozen_stadium_selected = frozen_stadium
-
-        controller.press_button(enums.Button.BUTTON_A)
-        self.stage_selected = True
+        controller.release_button(enums.Button.BUTTON_A)
+        controller.tilt_analog(
+            enums.Button.BUTTON_MAIN, _deflect(target_x - cursor.x), _deflect(target_y - cursor.y)
+        )
+        return
         self.frames_on_stage = 0
 
     def skip_postgame(self, controller: Controller):
