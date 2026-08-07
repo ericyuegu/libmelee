@@ -53,6 +53,13 @@ class InvalidDolphinPath(Exception):
     def __init__(self, message):
         self.message = message
 
+
+def _finite_int_or_zero(value):
+    if value is None or not math.isfinite(value):
+        return 0
+    return int(value)
+
+
 def _ignore_fifos(src, names):
     fifos = []
     for name in names:
@@ -1300,9 +1307,9 @@ class Console:
         playerstate.percent = post.percent
         playerstate.shield_strength = post.shield
         playerstate.stock = post.stock
-        playerstate.action_frame = int(post.state_age) if post.state_age is not None else 0
+        playerstate.action_frame = _finite_int_or_zero(post.state_age)
         playerstate.is_powershield = bool(post.state_flags and (post.state_flags[3] & 0x20))
-        playerstate.hitstun_frames_left = int(post.misc_as) if post.misc_as is not None else 0
+        playerstate.hitstun_frames_left = _finite_int_or_zero(post.misc_as)
         playerstate.on_ground = (not post.airborne) if post.airborne is not None else True
         playerstate.jumps_left = post.jumps_used if post.jumps_used is not None else 1
         playerstate.invulnerable = bool(post.hurtbox_state) if post.hurtbox_state is not None else False
@@ -1318,7 +1325,7 @@ class Console:
             playerstate.speed_x_attack = 0
             playerstate.speed_y_attack = 0
             playerstate.speed_ground_x_self = 0
-        playerstate.hitlag_left = int(post.hitlag_left) if post.hitlag_left is not None else 0
+        playerstate.hitlag_left = _finite_int_or_zero(post.hitlag_left)
 
         # The pre-warning occurs when we first start a dash dance.
         if controller_port in self._prev_gamestate.players:

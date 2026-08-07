@@ -6,11 +6,13 @@ Pin the libmelee→peppi-py parity contract documented in README.md so that
 `peppi_py.read_frame_dicts(slp)[i]`. The peppi-parity test is skipped if
 peppi_py is not installed; the other tests run standalone.
 """
+import math
 import struct
 import unittest
 
 import melee
 from melee import _canonical
+from melee.console import _finite_int_or_zero
 from melee.gamestate import (
     CanonicalFrame, Data, FodPlatform, Item, PortData, Post, Pre,
     DreamlandWhispy, CanonicalStadiumTransformation, GameState,
@@ -135,6 +137,34 @@ def _item_bytes(version: tuple, **overrides) -> bytes:
 # ─────────────────────────────────────────────────────────────────────
 
 class CanonicalReaders(unittest.TestCase):
+
+    def test_finite_int_or_zero_handles_missing_and_nonfinite_values(self):
+        self.assertEqual(_finite_int_or_zero(None), 0)
+        self.assertEqual(_finite_int_or_zero(float('nan')), 0)
+        self.assertEqual(_finite_int_or_zero(float('inf')), 0)
+        self.assertEqual(_finite_int_or_zero(float('-inf')), 0)
+        self.assertEqual(_finite_int_or_zero(7.9), 7)
+
+    def test_nonfinite_misc_action_state_survives_canonical_projection(self):
+        console = object.__new__(melee.Console)
+        console.slp_version_tuple = (3, 8, 0)
+        console._current_stage = melee.Stage.FINAL_DESTINATION
+        console._is_teams = False
+        console._costumes = [0, 0, 0, 0]
+        console._cpu_level = [0, 0, 0, 0]
+        console._team_id = [0, 0, 0, 0]
+        console._prev_gamestate = GameState()
+        console._use_manual_bookends = False
+
+        state = GameState()
+        state.frame = 0
+        event = bytearray(_post_bytes((3, 8, 0), misc_as=float('nan')))
+        struct.pack_into('>i', event, 0x1, state.frame)
+        console._Console__post_frame(state, bytes(event))
+
+        self.assertTrue(math.isnan(state._canonical.ports[1].leader.post.misc_as))
+        self.assertEqual(state.players[1].hitstun_frames_left, 0)
+
     def test_pre_required_fields(self):
         pre = _canonical.read_pre(
             _pre_bytes((0, 1, 0), random_seed=42, pos_x=1.5, joy_x=0.25), (0, 1, 0))
