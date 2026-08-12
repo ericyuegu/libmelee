@@ -10,6 +10,8 @@ import logging
 import enet
 import json
 import multiprocessing as mp
+import os
+import platform
 from multiprocessing.connection import Connection
 from multiprocessing.synchronize import Event
 
@@ -123,12 +125,31 @@ class SlippstreamWorker:
 
 def _run_worker(**kwargs):
     try:
+        logging.debug(
+            "Slippstream worker pid=%s address=%s port=%s",
+            os.getpid(),
+            kwargs["address"],
+            kwargs["port"],
+        )
         SlippstreamWorker(**kwargs).run()
     except KeyboardInterrupt:
         pass  # don't spam the console with stack traces
 
 class EnetDisconnected(Exception):
     """Raised when we get an enet disconnection."""
+
+
+def _default_multiprocessing_context():
+    """Return the process context used by the lightweight ENet worker.
+
+    On Linux, explicitly preserve the historical ``fork`` behavior. Python 3.14
+    changed the POSIX default to ``forkserver``; a fresh interpreter is both
+    unnecessary here and can be very expensive when libmelee is embedded in a
+    large application.
+    """
+    if platform.system() == "Linux":
+        return mp.get_context("fork")
+    return mp.get_context()
 
 class SlippstreamClient:
     """ Container representing a client to some SlippiComm server """
@@ -137,15 +158,23 @@ class SlippstreamClient:
         self,
         address="127.0.0.1",
         port=51441,
+        multiprocessing_context=None,
     ):
         self.address = address
         self.port = port
         self.running = False
 
-        # set up worker process
-        self._buffer, worker_buffer = mp.Pipe(False)
-        self._shutdown = mp.Event()
-        self._worker = mp.Process(
+        # Set up the lightweight ENet worker using one consistent context.
+        context = multiprocessing_context or _default_multiprocessing_context()
+        logging.debug(
+            "Slippstream worker start method=%s address=%s port=%s",
+            context.get_start_method(),
+            address,
+            port,
+        )
+        self._buffer, worker_buffer = context.Pipe(False)
+        self._shutdown = context.Event()
+        self._worker = context.Process(
             target=_run_worker,
             kwargs=dict(
                 address=address,

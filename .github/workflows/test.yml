@@ -8,7 +8,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
         os: ['ubuntu-latest', 'windows-latest', 'macos-latest']
 
     steps:
@@ -23,7 +23,7 @@ jobs:
       run: pip install .
 
     - name: Run tests
-      run: python test.py
+      run: python -m unittest test.py test_slippstream.py
 
   # "live" test with a running emulator, only on Ubuntu
   test_live:
@@ -31,7 +31,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
         os: ['ubuntu-latest']
 
     steps:

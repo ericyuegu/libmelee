@@ -389,6 +389,7 @@ class Console:
                  enable_ffw: bool = False,
                  dump_config: Optional[DumpConfig] = None,
                  debug: bool = False,
+                 multiprocessing_context=None,
                 ):
         """Create a Console object
 
@@ -403,6 +404,8 @@ class Console:
                 Unset to get a fresh directory that doesn't depend on system state.
             slippi_address (str): IP address of the Dolphin / Wii to connect to.
             slippi_port (int): UDP port that slippi will listen on
+            multiprocessing_context: Optional multiprocessing context for the
+                Slippstream network worker.
             online_delay (int): How many frames of delay to apply in online matches
             blocking_input (bool): Should dolphin block waiting for bot input
                 This is only really useful if you're doing ML training.
@@ -527,7 +530,11 @@ class Console:
         self._process = None
 
         if self.is_dolphin:
-            self._slippstream = SlippstreamClient(self.slippi_address, self.slippi_port)
+            self._slippstream = SlippstreamClient(
+                self.slippi_address,
+                self.slippi_port,
+                multiprocessing_context=multiprocessing_context,
+            )
 
             if is_remote:
                 if path:
